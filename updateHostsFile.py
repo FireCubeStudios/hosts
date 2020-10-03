@@ -21,16 +21,19 @@ import tempfile
 import time
 from glob import glob
 
-import lxml  # noqa: F401
-from bs4 import BeautifulSoup
-
 # Detecting Python 3 for version-dependent implementations
 PY3 = sys.version_info >= (3, 0)
 
-if PY3:
-    from urllib.request import urlopen
-else:
+if not PY3:
     raise Exception("We do not support Python 2 anymore.")
+
+
+try:
+    import requests
+except ImportError:
+    raise ImportError("This project's dependencies have changed. The Requests library ("
+                      "https://requests.readthedocs.io/en/master/) is now required.")
+
 
 # Syntactic sugar for "sudo" command in UNIX / Linux
 if platform.system() == "OpenBSD":
@@ -1089,12 +1092,7 @@ def write_opening_header(final_file, **header_params):
                 ),
             )
     else:
-        write_data(
-            final_file,
-            "# Title: StevenBlack/hosts\n#\n".format(
-                ", ".join(header_params["extensions"])
-            ),
-        )
+        write_data(final_file, "# Title: StevenBlack/hosts\n#\n")
 
     write_data(
         final_file,
@@ -1210,6 +1208,11 @@ def update_readme_data(readme_file, **readme_updates):
         readme_data = json.load(f)
         readme_data[extensions_key] = generation_data
 
+    for denomination, data in readme_data.copy().items():
+        if "location" in data and data["location"] and "\\" in data["location"]:
+            # Windows compatibility: #1166
+            readme_data[denomination]["location"] = data["location"].replace("\\", "/")
+
     with open(readme_file, "w") as f:
         json.dump(readme_data, f)
 
@@ -1293,6 +1296,7 @@ def flush_dns_cache():
 
         system_prefixes = ["/usr", ""]
         service_types = ["NetworkManager", "wicd", "dnsmasq", "networking"]
+        restarted_services = []
 
         for system_prefix in system_prefixes:
             systemctl = system_prefix + "/bin/systemctl"
@@ -1300,18 +1304,25 @@ def flush_dns_cache():
 
             for service_type in service_types:
                 service = service_type + ".service"
+                if service in restarted_services:
+                    continue
+
                 service_file = path_join_robust(system_dir, service)
                 service_msg = (
                     "Flushing the DNS cache by restarting " + service + " {result}"
                 )
 
                 if os.path.isfile(service_file):
+                    if 0 != subprocess.call([systemctl, "status", service],
+                                            stdout=subprocess.DEVNULL):
+                        continue
                     dns_cache_found = True
 
                     if subprocess.call(SUDO + [systemctl, "restart", service]):
                         print_failure(service_msg.format(result="failed"))
                     else:
                         print_success(service_msg.format(result="succeeded"))
+                    restarted_services.append(service)
 
         dns_clean_file = "/etc/init.d/dns-clean"
         dns_clean_msg = "Flushing the DNS cache via dns-clean executable {result}"
@@ -1461,33 +1472,37 @@ def maybe_copy_example_file(file_path):
             shutil.copyfile(example_file_path, file_path)
 
 
-def get_file_by_url(url):
+def get_file_by_url(url, params=None, **kwargs):
     """
-    Get a file data located at a particular URL.
+    Retrieve the contents of the hosts file at the URL, then pass it through domain_to_idna().
+
+    Parameters are passed to the requests.get() function.
 
     Parameters
     ----------
-    url : str
-        The URL at which to access the data.
+    url : str or bytes
+        URL for the new Request object.
+    params :
+        Dictionary, list of tuples or bytes to send in the query string for the Request.
+    kwargs :
+        Optional arguments that request takes.
 
     Returns
     -------
     url_data : str or None
         The data retrieved at that URL from the file. Returns None if the
         attempted retrieval is unsuccessful.
-
-    Note
-    ----
-    - BeautifulSoup is used in this case to avoid having to search in which
-        format we have to encode or decode data before parsing it to UTF-8.
     """
 
     try:
-        f = urlopen(url)
-        soup = BeautifulSoup(f.read(), "lxml").get_text()
-        return "\n".join(list(map(domain_to_idna, soup.split("\n"))))
-    except Exception:
-        print("Problem getting file: ", url)
+        req = requests.get(url=url, params=params, **kwargs)
+    except requests.exceptions.RequestException:
+        print("Error retrieving data from {}".format(url))
+        return None
+
+    req.encoding = req.apparent_encoding
+    res_text = "\n".join([domain_to_idna(line) for line in req.text.split("\n")])
+    return res_text
 
 
 def write_data(f, data):

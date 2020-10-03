@@ -8,6 +8,7 @@
 import json
 import locale
 import os
+import platform
 import re
 import shutil
 import sys
@@ -15,6 +16,8 @@ import tempfile
 import unittest
 import unittest.mock as mock
 from io import BytesIO, StringIO
+
+import requests
 
 import updateHostsFile
 from updateHostsFile import (
@@ -62,6 +65,8 @@ class Base(unittest.TestCase):
 
     @property
     def sep(self):
+        if platform.system().lower() == "windows":
+            return "\\"
         return os.sep
 
     def assert_called_once(self, mock_method):
@@ -473,9 +478,6 @@ class TestPromptForMove(Base):
         self.assert_called_once(mock_query)
         mock_move.assert_not_called()
 
-        mock_query.reset_mock()
-        mock_move.reset_mock()
-
     @mock.patch("updateHostsFile.move_hosts_file_into_place", return_value=0)
     @mock.patch("updateHostsFile.query_yes_no", return_value=True)
     def testPromptMove(self, mock_query, mock_move):
@@ -486,9 +488,6 @@ class TestPromptForMove(Base):
 
         self.assert_called_once(mock_query)
         self.assert_called_once(mock_move)
-
-        mock_query.reset_mock()
-        mock_move.reset_mock()
 
 
 # End Prompt the User
@@ -1122,12 +1121,13 @@ class TestUpdateReadmeData(BaseMockDir):
         )
         update_readme_data(self.readme_file, **kwargs)
 
+        if platform.system().lower() == "windows":
+            sep = "/"
+        else:
+            sep = self.sep
+
         expected = {
-            "base": {
-                "location": "foo" + self.sep,
-                "sourcesdata": "hosts",
-                "entries": 5,
-            },
+            "base": {"location": "foo" + sep, "sourcesdata": "hosts", "entries": 5},
             "foo": "bar",
         }
 
@@ -1144,8 +1144,13 @@ class TestUpdateReadmeData(BaseMockDir):
         )
         update_readme_data(self.readme_file, **kwargs)
 
+        if platform.system().lower() == "windows":
+            sep = "/"
+        else:
+            sep = self.sep
+
         expected = {
-            "base": {"location": "foo" + self.sep, "sourcesdata": "hosts", "entries": 5}
+            "base": {"location": "foo" + sep, "sourcesdata": "hosts", "entries": 5}
         }
 
         with open(self.readme_file, "r") as f:
@@ -1164,12 +1169,13 @@ class TestUpdateReadmeData(BaseMockDir):
         )
         update_readme_data(self.readme_file, **kwargs)
 
+        if platform.system().lower() == "windows":
+            sep = "/"
+        else:
+            sep = self.sep
+
         expected = {
-            "com-org": {
-                "location": "foo" + self.sep,
-                "sourcesdata": "hosts",
-                "entries": 5,
-            }
+            "com-org": {"location": "foo" + sep, "sourcesdata": "hosts", "entries": 5}
         }
 
         with open(self.readme_file, "r") as f:
@@ -1324,7 +1330,7 @@ class TestFlushDnsCache(BaseStdout):
                 self.assertIn(expected, output)
 
     @mock.patch("os.path.isfile", side_effect=[True, False, False, True] + [False] * 10)
-    @mock.patch("subprocess.call", side_effect=[1, 0])
+    @mock.patch("subprocess.call", side_effect=[1, 0, 0])
     def test_flush_posix_fail_then_succeed(self, *_):
         with self.mock_property("platform.system") as obj:
             obj.return_value = "Linux"
@@ -1400,77 +1406,6 @@ class TestRemoveOldHostsFile(BaseMockDir):
 
 
 # End File Logic
-
-
-# Helper Functions
-def mock_url_open(url):
-    """
-    Mock of `urlopen` that returns the url in a `BytesIO` stream.
-
-    Parameters
-    ----------
-    url : str
-        The URL associated with the file to open.
-
-    Returns
-    -------
-    bytes_stream : BytesIO
-        The `url` input wrapped in a `BytesIO` stream.
-    """
-
-    return BytesIO(url)
-
-
-def mock_url_open_fail(_):
-    """
-    Mock of `urlopen` that fails with an Exception.
-    """
-
-    raise Exception()
-
-
-def mock_url_open_read_fail(_):
-    """
-    Mock of `urlopen` that returns an object that fails on `read`.
-
-    Returns
-    -------
-    file_mock : mock.Mock
-        A mock of a file object that fails when reading.
-    """
-
-    def fail_read():
-        raise Exception()
-
-    m = mock.Mock()
-
-    m.read = fail_read
-    return m
-
-
-def mock_url_open_decode_fail(_):
-    """
-    Mock of `urlopen` that returns an object that fails on during decoding
-    the output of `urlopen`.
-
-    Returns
-    -------
-    file_mock : mock.Mock
-        A mock of a file object that fails when decoding the output.
-    """
-
-    def fail_decode(_):
-        raise Exception()
-
-    def read():
-        s = mock.Mock()
-        s.decode = fail_decode
-
-        return s
-
-    m = mock.Mock()
-    m.read = read
-    return m
 
 
 class DomainToIDNA(Base):
@@ -1612,44 +1547,45 @@ class DomainToIDNA(Base):
 
 
 class GetFileByUrl(BaseStdout):
-    @mock.patch("updateHostsFile.urlopen", side_effect=mock_url_open)
-    def test_read_url(self, _):
-        url = b"www.google.com"
+    def test_basic(self):
+        raw_resp_content = "hello, ".encode("ascii") + "world".encode("utf-8")
+        resp_obj = requests.Response()
+        resp_obj.__setstate__({"_content": raw_resp_content})
 
-        expected = "www.google.com"
-        actual = get_file_by_url(url)
+        expected = "hello, world"
 
-        self.assertEqual(actual, expected)
+        with mock.patch("requests.get", return_value=resp_obj):
+            actual = get_file_by_url("www.test-url.com")
 
-    @mock.patch("updateHostsFile.urlopen", side_effect=mock_url_open_fail)
-    def test_read_url_fail(self, _):
-        url = b"www.google.com"
-        self.assertIsNone(get_file_by_url(url))
+        self.assertEqual(expected, actual)
 
-        expected = "Problem getting file:"
-        output = sys.stdout.getvalue()
+    def test_with_idna(self):
+        raw_resp_content = b"www.huala\xc3\xb1e.cl"
+        resp_obj = requests.Response()
+        resp_obj.__setstate__({"_content": raw_resp_content})
 
-        self.assertIn(expected, output)
+        expected = "www.xn--hualae-0wa.cl"
 
-    @mock.patch("updateHostsFile.urlopen", side_effect=mock_url_open_read_fail)
-    def test_read_url_read_fail(self, _):
-        url = b"www.google.com"
-        self.assertIsNone(get_file_by_url(url))
+        with mock.patch("requests.get", return_value=resp_obj):
+            actual = get_file_by_url("www.test-url.com")
 
-        expected = "Problem getting file:"
-        output = sys.stdout.getvalue()
+        self.assertEqual(expected, actual)
 
-        self.assertIn(expected, output)
+    def test_connect_unknown_domain(self):
+        test_url = "http://doesnotexist.google.com"  # leads to exception: ConnectionError
+        with mock.patch("requests.get", side_effect=requests.exceptions.ConnectionError):
+            return_value = get_file_by_url(test_url)
+        self.assertIsNone(return_value)
+        printed_output = sys.stdout.getvalue()
+        self.assertEqual(printed_output, "Error retrieving data from {}\n".format(test_url))
 
-    @mock.patch("updateHostsFile.urlopen", side_effect=mock_url_open_decode_fail)
-    def test_read_url_decode_fail(self, _):
-        url = b"www.google.com"
-        self.assertIsNone(get_file_by_url(url))
-
-        expected = "Problem getting file:"
-        output = sys.stdout.getvalue()
-
-        self.assertIn(expected, output)
+    def test_invalid_url(self):
+        test_url = "http://fe80::5054:ff:fe5a:fc0"  # leads to exception: InvalidURL
+        with mock.patch("requests.get", side_effect=requests.exceptions.ConnectionError):
+            return_value = get_file_by_url(test_url)
+        self.assertIsNone(return_value)
+        printed_output = sys.stdout.getvalue()
+        self.assertEqual(printed_output, "Error retrieving data from {}\n".format(test_url))
 
 
 class TestWriteData(Base):
@@ -1743,9 +1679,7 @@ class TestIsValidDomainFormat(BaseStdout):
         self.assertTrue(expected in output)
 
     def test_invalid_domain(self):
-        expected = (
-            "Do not include www.domain.com or http(s)://domain.com. Try again."
-        )
+        expected = "Do not include www.domain.com or http(s)://domain.com. Try again."
 
         for invalid_domain in [
             "www.subdomain.domain",
